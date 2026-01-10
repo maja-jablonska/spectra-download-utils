@@ -71,6 +71,22 @@ setup to route logs to JSON or centralized logging systems.
 3. Register the new source in your `sources` mapping passed to
    `bulk_download`.
 
+## Customizing File Processing
+
+`SpectraSource` includes a single, explicit hook for how files are fetched and
+prepared before persistence. Override this when a source needs custom handling
+(for example, alternate authentication, decompression, or non-standard
+DataLink resolution):
+
+- `SpectraSource.fetch_fits_payload(access_url, spectrum)` returns the raw FITS
+  bytes plus any metadata updates to apply (for example, a resolved `access_url`
+  after DataLink hops).
+
+For structured outputs, continue to override:
+
+- `spectrum_to_zarr_components(...)` for spectra
+- `ccf_to_zarr_components(...)` for CCF products
+
 ## Repository Layout
 
 - `spectra_download/models.py`: Shared data models for requests and results.
