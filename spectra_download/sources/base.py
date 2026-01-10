@@ -349,6 +349,52 @@ class SpectraSource(ABC):
             progress_every=progress_every,
         )
 
+    def fetch_fits_payload(
+        self,
+        *,
+        access_url: str,
+        spectrum: Spectrum,
+    ) -> tuple[bytes, Dict[str, Any]]:
+        """Fetch FITS bytes for a spectrum.
+
+        Override this in source subclasses to customize how the FITS payload is
+        resolved, downloaded, or transformed before persistence.
+
+        Returns:
+            (fits_bytes, metadata_updates)
+        """
+
+        fits_bytes = download_bytes(access_url, timeout=self.timeout, max_retries=self.max_retries)
+
+        metadata_updates: Dict[str, Any] = {}
+        datalink_hops = 0
+        datalink_url = access_url
+        while _looks_like_votable(fits_bytes) and datalink_hops < 3:
+            resolved = _extract_datalink_this_url(fits_bytes)
+            if not resolved:
+                logger.warning(
+                    "DataLink VOTable detected but could not resolve #this URL",
+                    extra={"source": self.name, "spectrum_id": spectrum.spectrum_id, "url": datalink_url},
+                )
+                break
+            logger.info(
+                "Resolved DataLink VOTable to product URL",
+                extra={
+                    "source": self.name,
+                    "spectrum_id": spectrum.spectrum_id,
+                    "datalink_url": datalink_url,
+                    "resolved_url": resolved,
+                    "hop": datalink_hops + 1,
+                },
+            )
+            metadata_updates["datalink_url"] = datalink_url
+            metadata_updates["access_url"] = resolved
+            datalink_url = resolved
+            fits_bytes = download_bytes(resolved, timeout=self.timeout, max_retries=self.max_retries)
+            datalink_hops += 1
+
+        return fits_bytes, metadata_updates
+
     def _persist_spectra_outputs(
         self,
         spectra: List[Spectrum],
@@ -469,9 +515,10 @@ class SpectraSource(ABC):
                 "Fetching FITS bytes for persistence",
                 extra={"source": self.name, "spectrum_id": spectrum.spectrum_id, "url": access_url},
             )
-            fits_bytes = download_bytes(access_url, timeout=self.timeout, max_retries=self.max_retries)
-
             new_metadata = dict(spectrum.metadata)
+            fits_bytes, metadata_updates = self.fetch_fits_payload(access_url=access_url, spectrum=spectrum)
+            if metadata_updates:
+                new_metadata.update(metadata_updates)
             # Provide stable persistence naming for downstream consumers.
             new_metadata["save_name"] = filename
             if filename_strategy == "identifier":
@@ -482,34 +529,6 @@ class SpectraSource(ABC):
                 else:
                     new_metadata["_spec_index"] = ccf_seen
                     new_metadata["_spec_total"] = ccf_total
-
-            # ESO/TAP (and some other archives) return DataLink VOTables from access_url.
-            # If so, resolve the actual downloadable product URL (#this) and fetch that.
-            datalink_hops = 0
-            datalink_url = access_url
-            while _looks_like_votable(fits_bytes) and datalink_hops < 3:
-                resolved = _extract_datalink_this_url(fits_bytes)
-                if not resolved:
-                    logger.warning(
-                        "DataLink VOTable detected but could not resolve #this URL",
-                        extra={"source": self.name, "spectrum_id": spectrum.spectrum_id, "url": datalink_url},
-                    )
-                    break
-                logger.info(
-                    "Resolved DataLink VOTable to product URL",
-                    extra={
-                        "source": self.name,
-                        "spectrum_id": spectrum.spectrum_id,
-                        "datalink_url": datalink_url,
-                        "resolved_url": resolved,
-                        "hop": datalink_hops + 1,
-                    },
-                )
-                new_metadata["datalink_url"] = datalink_url
-                new_metadata["access_url"] = resolved
-                datalink_url = resolved
-                fits_bytes = download_bytes(resolved, timeout=self.timeout, max_retries=self.max_retries)
-                datalink_hops += 1
 
             if raw_dir is not None:
                 logger.info(
@@ -778,8 +797,8 @@ class SpectraSource(ABC):
                     name,
                     shape=arr.shape,
                     dtype=arr.dtype,
-            overwrite=overwrite,
-        )
+                    overwrite=overwrite,
+                )
                 ds[...] = arr
 
         # Attach attributes.
