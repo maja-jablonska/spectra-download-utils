@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from numpy.typing import ArrayLike
+
 
 @dataclass(frozen=True)
 class Spectrum:
@@ -12,7 +14,24 @@ class Spectrum:
 
     spectrum_id: str
     source: str
-    peaks: List[Dict[str, Any]]
+    intensity: ArrayLike
+    wavelength: ArrayLike
+    normalized: bool
+    metadata: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CCF:
+    """Represents a cross-correlation function (CCF) product.
+
+    This is primarily used for persistence/conversion (e.g., writing to Zarr)
+    when CCFs require different parsing than regular spectra.
+    """
+
+    ccf_id: str
+    source: str
+    velocity: ArrayLike
+    ccf: ArrayLike
     metadata: Dict[str, Any]
 
 

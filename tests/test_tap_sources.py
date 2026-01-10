@@ -2,7 +2,7 @@ import unittest
 from urllib.parse import parse_qs, unquote, urlparse
 
 from spectra_download.sources.eso import EsoHarpsSource
-from spectra_download.sources.tap import TapSpectraSource, _tap_records
+from spectra_download.sources.tap import TapSpectraSource, _tap_records, _cone_where
 
 
 class DummyTapSource(TapSpectraSource):
@@ -58,12 +58,31 @@ class TestTapSourceBuildRequestUrl(unittest.TestCase):
         self.assertIn("SELECT TOP 5 obs_id, access_url", query)
         self.assertIn("WHERE obs_id='OBS123' AND calib_level=2 AND data_product_type='spectrum'", query)
 
+    def test_build_request_url_without_identifier_field_uses_where_only(self) -> None:
+        source = DummyTapSource()
+        url = source.build_request_url(
+            "IGNORED",
+            {
+                "identifier_field": None,
+                "where": "1=1",
+            },
+        )
+        params = parse_qs(urlparse(url).query)
+        query = unquote(params["QUERY"][0])
+        self.assertIn("WHERE 1=1", query)
+        self.assertNotIn("obs_id='IGNORED'", query)
+
     def test_eso_harps_instrument_condition(self) -> None:
         source = EsoHarpsSource()
         url = source.build_request_url("OBS123", {})
         params = parse_qs(urlparse(url).query)
         query = unquote(params["QUERY"][0])
         self.assertIn("instrument_name='HARPS'", query)
+
+    def test_cone_where_format(self) -> None:
+        frag = _cone_where(ra_deg=10.0, dec_deg=-5.0, radius_arcsec=5.0)
+        self.assertIn("CONTAINS(", frag)
+        self.assertIn("CIRCLE('ICRS', 10.0, -5.0", frag)
 
 
 class TestTapSourceParseResponse(unittest.TestCase):
@@ -77,7 +96,7 @@ class TestTapSourceParseResponse(unittest.TestCase):
         self.assertEqual(len(spectra), 1)
         spectrum = spectra[0]
         self.assertEqual(spectrum.spectrum_id, "OBS1")
-        self.assertEqual(spectrum.peaks, [{"mz": 1, "intensity": 2}])
+        self.assertEqual(spectrum.metadata["peaks"], [{"mz": 1, "intensity": 2}])
         self.assertEqual(spectrum.metadata["obs_publisher_did"], "PUB1")
         self.assertEqual(spectrum.metadata["obs_id"], "OBS1")
 

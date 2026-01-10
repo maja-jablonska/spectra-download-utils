@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib import error, request
 
@@ -33,6 +35,10 @@ def download_json(url: str, *, timeout: int = 30, max_retries: int = 3) -> Dict[
         try:
             with request.urlopen(url, timeout=timeout) as response:
                 payload = response.read().decode("utf-8")
+                logger.debug(
+                    "Download successful",
+                    extra={"url": url, "attempt": attempt, "bytes": len(payload)},
+                )
                 return json.loads(payload)
         except (error.URLError, json.JSONDecodeError) as exc:
             last_error = str(exc)
@@ -43,3 +49,46 @@ def download_json(url: str, *, timeout: int = 30, max_retries: int = 3) -> Dict[
             time.sleep(0.5 * attempt)
 
     raise DownloadError(f"Failed to download {url}: {last_error}")
+
+
+def download_bytes(url: str, *, timeout: int = 30, max_retries: int = 3) -> bytes:
+    """Download a binary payload with retries."""
+
+    last_error: Optional[str] = None
+    for attempt in range(1, max_retries + 1):
+        logger.debug("Fetching bytes", extra={"url": url, "attempt": attempt})
+        try:
+            with request.urlopen(url, timeout=timeout) as response:
+                payload = response.read()
+                logger.debug(
+                    "Download successful",
+                    extra={"url": url, "attempt": attempt, "bytes": len(payload)},
+                )
+                return payload
+        except error.URLError as exc:
+            last_error = str(exc)
+            logger.warning(
+                "Download attempt failed",
+                extra={"url": url, "attempt": attempt, "error": last_error},
+            )
+            time.sleep(0.5 * attempt)
+
+    raise DownloadError(f"Failed to download {url}: {last_error}")
+
+
+def download_file(
+    url: str,
+    destination: str | os.PathLike[str],
+    *,
+    timeout: int = 30,
+    max_retries: int = 3,
+) -> Path:
+    """Download a URL and write it to `destination` (binary)."""
+
+    dest = Path(destination)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Downloading file", extra={"url": url, "destination": str(dest)})
+    payload = download_bytes(url, timeout=timeout, max_retries=max_retries)
+    dest.write_bytes(payload)
+    logger.info("File saved", extra={"destination": str(dest), "bytes": len(payload)})
+    return dest
