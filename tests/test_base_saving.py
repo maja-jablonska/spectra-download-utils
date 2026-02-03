@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from spectra_download.models import Spectrum
+from spectra_download.models import SpectrumRecord
 from spectra_download.sources.base import SpectraSource
 
 
@@ -14,14 +14,11 @@ class DummySource(SpectraSource):
     def build_request_url(self, identifier: str, extra_params: dict) -> str:  # type: ignore[override]
         return f"https://example.test/query?id={identifier}"
 
-    def parse_response(self, payload: dict, identifier: str) -> list[Spectrum]:  # type: ignore[override]
+    def parse_response(self, payload: dict, identifier: str) -> list[SpectrumRecord]:  # type: ignore[override]
         return [
-            Spectrum(
+            SpectrumRecord(
                 spectrum_id="spec1",
                 source=self.name,
-                intensity=[],
-                wavelength=[],
-                normalized=False,
                 metadata={"access_url": "https://example.test/spec1.fits", "identifier": identifier},
             )
         ]
@@ -71,6 +68,12 @@ class TestBaseSaving(unittest.TestCase):
             self.assertIn("spectra/HD1/intensity", root)
             self.assertIn("spectra/HD1/wavelength", root)
             self.assertNotIn("spectra/HD1/fits_bytes", root)
+            self.assertNotIn("spectra/HD1/n_points", root)
+
+            intensity = root["spectra/HD1/intensity"]
+            wavelength = root["spectra/HD1/wavelength"]
+            self.assertEqual(intensity.shape[0], 1)
+            self.assertEqual(wavelength.shape[0], 1)
 
     def test_zarr_paths_alias_works_like_save_path(self) -> None:
         try:
@@ -98,6 +101,10 @@ class TestBaseSaving(unittest.TestCase):
             root = zarr.open_group(store_path, mode="r")
             self.assertIn("spectra/HD1/intensity", root)
             self.assertNotIn("spectra/HD1/fits_bytes", root)
+            self.assertNotIn("spectra/HD1/n_points", root)
+
+            intensity = root["spectra/HD1/intensity"]
+            self.assertEqual(intensity.shape[0], 1)
 
     def test_multiple_spectra_write_multiple_intensity_arrays_under_same_group(self) -> None:
         try:
@@ -111,22 +118,16 @@ class TestBaseSaving(unittest.TestCase):
             def build_request_url(self, identifier: str, extra_params: dict) -> str:  # type: ignore[override]
                 return f"https://example.test/query?id={identifier}"
 
-            def parse_response(self, payload: dict, identifier: str) -> list[Spectrum]:  # type: ignore[override]
+            def parse_response(self, payload: dict, identifier: str) -> list[SpectrumRecord]:  # type: ignore[override]
                 return [
-                    Spectrum(
+                    SpectrumRecord(
                         spectrum_id="s1",
                         source=self.name,
-                        intensity=[],
-                        wavelength=[],
-                        normalized=False,
                         metadata={"access_url": "https://example.test/s1.fits", "identifier": identifier, "product": "spectrum"},
                     ),
-                    Spectrum(
+                    SpectrumRecord(
                         spectrum_id="s2",
                         source=self.name,
-                        intensity=[],
-                        wavelength=[],
-                        normalized=False,
                         metadata={"access_url": "https://example.test/s2.fits", "identifier": identifier, "product": "spectrum"},
                     ),
                 ]
@@ -156,6 +157,7 @@ class TestBaseSaving(unittest.TestCase):
             wavelength = root["spectra/HD1/wavelength"]
             self.assertEqual(intensity.shape, (2, 3))
             self.assertEqual(wavelength.shape, (2, 3))
+            self.assertNotIn("spectra/HD1/n_points", root)
 
             import numpy as np  # type: ignore
 
@@ -175,14 +177,11 @@ class TestBaseSaving(unittest.TestCase):
             def build_request_url(self, identifier: str, extra_params: dict) -> str:  # type: ignore[override]
                 return f"https://example.test/query?id={identifier}"
 
-            def parse_response(self, payload: dict, identifier: str) -> list[Spectrum]:  # type: ignore[override]
+            def parse_response(self, payload: dict, identifier: str) -> list[SpectrumRecord]:  # type: ignore[override]
                 return [
-                    Spectrum(
+                    SpectrumRecord(
                         spectrum_id="ccf1",
                         source=self.name,
-                        intensity=[],
-                        wavelength=[],
-                        normalized=False,
                         metadata={
                             "access_url": "https://example.test/ccf1.fits",
                             "identifier": identifier,
@@ -207,6 +206,9 @@ class TestBaseSaving(unittest.TestCase):
             root = zarr.open_group(store_path, mode="r")
             # For CCF, Zarr group is the object identifier (no _ccf suffix) and only the CCF is stored.
             self.assertIn("spectra/HD1/ccf", root)
+            ccf = root["spectra/HD1/ccf"]
+            self.assertEqual(ccf.shape[0], 1)
+            self.assertNotIn("spectra/HD1/n_ccf_points", root)
 
     def test_not_found_path_appends_identifier_when_no_records(self) -> None:
         class EmptySource(SpectraSource):
@@ -215,7 +217,7 @@ class TestBaseSaving(unittest.TestCase):
             def build_request_url(self, identifier: str, extra_params: dict) -> str:  # type: ignore[override]
                 return f"https://example.test/query?id={identifier}"
 
-            def parse_response(self, payload: dict, identifier: str) -> list[Spectrum]:  # type: ignore[override]
+            def parse_response(self, payload: dict, identifier: str) -> list[SpectrumRecord]:  # type: ignore[override]
                 return []
 
         source = EmptySource(timeout=1, max_retries=1)

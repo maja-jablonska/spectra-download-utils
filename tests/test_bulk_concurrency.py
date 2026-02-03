@@ -3,7 +3,7 @@ import time
 import unittest
 
 from spectra_download.bulk import bulk_download
-from spectra_download.models import SpectraRequest, Spectrum
+from spectra_download.models import SpectraRequest, SpectrumRecord
 from spectra_download.sources.base import SpectraSource
 
 
@@ -17,20 +17,17 @@ class BlockingSource(SpectraSource):
     def build_request_url(self, identifier: str, extra_params: dict) -> str:  # type: ignore[override]
         return "https://example.test"
 
-    def parse_response(self, payload: dict, identifier: str) -> list[Spectrum]:  # type: ignore[override]
+    def parse_response(self, payload: dict, identifier: str) -> list[SpectrumRecord]:  # type: ignore[override]
         return []
 
-    def download(self, identifier: str, extra_params: dict | None = None) -> list[Spectrum]:  # type: ignore[override]
+    def download(self, identifier: str, extra_params: dict | None = None) -> list[SpectrumRecord]:  # type: ignore[override]
         # Both requests must enter here concurrently to pass quickly.
         self._barrier.wait(timeout=2.0)
         time.sleep(0.05)
         return [
-            Spectrum(
+            SpectrumRecord(
                 spectrum_id=identifier,
                 source=self.name,
-                intensity=[],
-                wavelength=[],
-                normalized=False,
                 metadata={"identifier": identifier},
             )
         ]

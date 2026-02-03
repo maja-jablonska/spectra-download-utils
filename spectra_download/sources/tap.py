@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 from urllib.parse import urlencode
 
-from spectra_download.models import Spectrum
+from spectra_download.models import SpectrumRecord
 from spectra_download.sources.base import SpectraSource
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,14 @@ class TapSpectraSource(SpectraSource):
     select_fields: Sequence[str] = ()
     extra_conditions: Sequence[str] = ()
 
-    def download(self, identifier: str, extra_params: Dict[str, Any] | None = None) -> List[Spectrum]:  # type: ignore[override]
+    def download(  # type: ignore[override]
+        self,
+        identifier: str,
+        extra_params: Dict[str, Any] | None = None,
+        *,
+        raw_save_path: str | os.PathLike[str] | None = None,
+        zarr_paths: str | os.PathLike[str] | List[str | os.PathLike[str]] | None = None,
+    ) -> List[SpectrumRecord]:
         """Download using TAP, optionally trying fallback identifiers.
 
         If `extra_params["fallback_identifiers"]` is provided, candidates are tried
@@ -96,6 +104,10 @@ class TapSpectraSource(SpectraSource):
         """
 
         extra_params = dict(extra_params or {})
+        if raw_save_path is not None and "raw_save_path" not in extra_params and "save_dir" not in extra_params:
+            extra_params["raw_save_path"] = raw_save_path
+        if zarr_paths is not None and "zarr_paths" not in extra_params and "save_path" not in extra_params:
+            extra_params["zarr_paths"] = zarr_paths
         fallbacks = extra_params.get("fallback_identifiers") or []
         use_coords = bool(extra_params.get("use_coords", False))
         radius_arcsec = float(extra_params.get("search_radius_arcsec", 5.0) or 5.0)
@@ -113,7 +125,7 @@ class TapSpectraSource(SpectraSource):
             if c and isinstance(c, str):
                 candidates.append(c)
 
-        last: List[Spectrum] = []
+        last: List[SpectrumRecord] = []
         for cand in candidates:
             params = dict(extra_params)
             # Remove fallbacks so we don't recurse/duplicate tries through super().
@@ -143,7 +155,7 @@ class TapSpectraSource(SpectraSource):
                     except Exception:
                         continue
                     if spectra:
-                        relabeled: List[Spectrum] = []
+                        relabeled: List[SpectrumRecord] = []
                         for s in spectra:
                             md = dict(s.metadata)
                             md.setdefault("query_identifier", cand)
@@ -152,12 +164,9 @@ class TapSpectraSource(SpectraSource):
                             md.setdefault("search_radius_arcsec", radius_arcsec)
                             md["identifier"] = identifier
                             relabeled.append(
-                                Spectrum(
+                                SpectrumRecord(
                                     spectrum_id=s.spectrum_id,
                                     source=s.source,
-                                    intensity=s.intensity,
-                                    wavelength=s.wavelength,
-                                    normalized=s.normalized,
                                     metadata=md,
                                 )
                             )
@@ -172,18 +181,15 @@ class TapSpectraSource(SpectraSource):
                 continue
             if spectra:
                 # Re-label to the primary identifier for consistent saving.
-                relabeled: List[Spectrum] = []
+                relabeled: List[SpectrumRecord] = []
                 for s in spectra:
                     md = dict(s.metadata)
                     md.setdefault("query_identifier", cand)
                     md["identifier"] = identifier
                     relabeled.append(
-                        Spectrum(
+                        SpectrumRecord(
                             spectrum_id=s.spectrum_id,
                             source=s.source,
-                            intensity=s.intensity,
-                            wavelength=s.wavelength,
-                            normalized=s.normalized,
                             metadata=md,
                         )
                     )
@@ -227,11 +233,11 @@ class TapSpectraSource(SpectraSource):
         }
         return f"{tap_url}?{urlencode(params)}"
 
-    def parse_response(self, payload: Dict[str, Any], identifier: str) -> List[Spectrum]:
+    def parse_response(self, payload: Dict[str, Any], identifier: str) -> List[SpectrumRecord]:
         records = _tap_records(payload)
         if not records:
             logger.warning("No spectra found", extra={"source": self.name, "identifier": identifier})
-        spectra: List[Spectrum] = []
+        spectra: List[SpectrumRecord] = []
         for record in records:
             peaks = record.get("peaks", []) if isinstance(record, dict) else []
             metadata = {key: value for key, value in record.items() if key != "peaks"}
@@ -245,12 +251,9 @@ class TapSpectraSource(SpectraSource):
                 or identifier
             )
             spectra.append(
-                Spectrum(
+                SpectrumRecord(
                     spectrum_id=spectrum_id,
                     source=self.name,
-                    intensity=[],
-                    wavelength=[],
-                    normalized=False,
                     metadata={**metadata, "identifier": metadata.get("identifier") or identifier},
                 )
             )

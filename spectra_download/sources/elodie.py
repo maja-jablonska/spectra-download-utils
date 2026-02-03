@@ -15,14 +15,20 @@ from __future__ import annotations
 import logging
 import re
 import time
+from astropy.coordinates import Angle
+import astropy.units as u
+import numpy as np
 from html.parser import HTMLParser
 import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib import error, request
 from urllib.parse import parse_qs, quote, urljoin, urlparse
+from astropy.io import fits as astro_fits
+from io import BytesIO
 
-from spectra_download.models import Spectrum
+from spectra_download.models import CCFRecord, SpectrumRecord
 from spectra_download.sources.base import SpectraSource
+from spectra_download.sources.keys import DataKeys, ObservedFrame, SpectrumKeys
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +183,41 @@ class ElodieSource(SpectraSource):
 
     # Matches `elodie.ipynb`.
     base_url = "http://atlas.obs-hp.fr/elodie/"
+    
+    def extract_ccf_arrays_from_fits_payload(self, *, fits_bytes: bytes, spectrum: SpectrumRecord):
+        fits = astro_fits.open(BytesIO(fits_bytes))
+        return {"ccf": np.atleast_1d(np.array(fits[0].data, dtype=np.float64))}, {}
+    
+    def extract_spectrum_arrays_from_fits_payload(
+        self, *, fits_bytes: bytes, spectrum: SpectrumRecord
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Extract Zarr-ready arrays for ELODIE spectra from FITS bytes."""
+        fits = astro_fits.open(BytesIO(fits_bytes))
+        if len(fits) != 3:
+            raise ValueError(f"ELODIE FITS files should have 3 extensions. This fits file has {len(fits)} extensions.")
+        hdr = fits[0].header
+        n = hdr["NAXIS1"]
+        crval = hdr["CRVAL1"]      # in units of 0.1 nm
+        cdelt = hdr["CDELT1"]
+        crpix = hdr["CRPIX1"]
+        arrays: Dict[str, Any] = {
+            SpectrumKeys.wavelengths.value: (crval + (np.arange(n) + 1 - crpix) * cdelt),
+            SpectrumKeys.intensity.value: np.atleast_1d(np.array(fits[0].data, dtype=np.float64)),
+            SpectrumKeys.error.value: np.atleast_1d(np.array(fits[2].data, dtype=np.float64))
+        }
+        info: Dict[str, Any] = {
+            DataKeys.exptime.value: hdr['EXPTIME'],
+            DataKeys.ra.value: Angle(hdr['ALPHA'], unit=u.hourangle).degree,
+            DataKeys.dec.value: Angle(hdr['DELTA'], unit=u.deg).degree,
+            DataKeys.date.value: hdr['DATE-OBS'],
+            DataKeys.mjd.value: hdr['MJD-OBS'],
+            DataKeys.airmass.value: hdr['AIRMASS'],
+            DataKeys.object.value: hdr['OBJECT'],
+            DataKeys.berv.value: hdr['BERV'],
+            DataKeys.frame.value: ObservedFrame.observer.value,
+            DataKeys.normalized.value: False,
+        }
+        return arrays, info
 
     def build_request_url(self, identifier: str, extra_params: Dict[str, Any]) -> str:
         base_url = _normalize_base_url(str(extra_params.get("base_url") or self.base_url))
@@ -209,7 +250,7 @@ class ElodieSource(SpectraSource):
                 time.sleep(0.5 * attempt)
         raise RuntimeError(f"Failed to download {url}: {last_error}")
 
-    def parse_response(self, payload: Dict[str, Any], identifier: str) -> List[Spectrum]:
+    def parse_response(self, payload: Dict[str, Any], identifier: str) -> List[SpectrumRecord]:
         html = payload.get("html")
         if not isinstance(html, str):
             raise TypeError("ELODIE parse_response expects payload['html'] as a string")
@@ -227,16 +268,13 @@ class ElodieSource(SpectraSource):
             "ELODIE spectra links extracted",
             extra={"source": self.name, "identifier": identifier, "count": len(spectra_urls)},
         )
-        spectra: List[Spectrum] = []
+        spectra: List[SpectrumRecord] = []
         for idx, url in enumerate(spectra_urls, start=1):
             spectrum_id = _spectrum_id_from_url(url, fallback=f"{identifier}:spectrum:{idx}")
             spectra.append(
-                Spectrum(
+                SpectrumRecord(
                     spectrum_id=spectrum_id,
                     source=self.name,
-                    intensity=[],
-                    wavelength=[],
-                    normalized=False,
                     metadata={
                         "identifier": identifier,
                         "product": "spectrum",
@@ -256,7 +294,7 @@ class ElodieSource(SpectraSource):
         zarr_paths: str | os.PathLike[str] | Sequence[str | os.PathLike[str]] | None = None,
         not_found_path: str | os.PathLike[str] | None = None,
         error_path: str | os.PathLike[str] | None = None,
-    ) -> List[Spectrum]:
+    ) -> List[SpectrumRecord]:
         """Download ELODIE spectra (and optionally CCF) for an object identifier.
 
         Optional persistence (same semantics as the base class post-processing):
@@ -336,12 +374,9 @@ class ElodieSource(SpectraSource):
             for idx, ccf_url in enumerate(ccf_urls, start=1):
                 ccf_id = _spectrum_id_from_url(ccf_url, fallback=f"{identifier}:ccf:{idx}")
                 spectra.append(
-                    Spectrum(
+                    CCFRecord(
                         spectrum_id=ccf_id,
                         source=self.name,
-                        intensity=[],
-                        wavelength=[],
-                        normalized=False,
                         metadata={
                             "identifier": identifier,
                             "product": "ccf",

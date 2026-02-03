@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 
 from spectra_download.http_client import download_bytes, download_file, download_json
 from spectra_download.fits_utils import extract_1d_wavelength_intensity_from_fits_bytes, extract_ccf_from_fits_bytes
-from spectra_download.models import CCF, Spectrum
+from spectra_download.models import CCFRecord, SpectrumRecord
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,7 @@ def _filename_from_access_url(access_url: str) -> str | None:
         return None
 
 
-def _product_tag(spectrum: Spectrum) -> str | None:
+def _product_tag(spectrum: SpectrumRecord) -> str | None:
     product = spectrum.metadata.get("product")
     return str(product).strip().lower() if product is not None else None
 
@@ -165,10 +165,19 @@ class SpectraSource(ABC):
         """Build the request URL for the spectra identifier."""
 
     @abstractmethod
-    def parse_response(self, payload: Dict[str, Any], identifier: str) -> List[Spectrum]:
+    def parse_response(self, payload: Dict[str, Any], identifier: str) -> List[SpectrumRecord]:
         """Parse response payload into spectra records."""
 
-    def download(self, identifier: str, extra_params: Optional[Dict[str, Any]] = None) -> List[Spectrum]:
+    def download(
+        self,
+        identifier: str,
+        extra_params: Optional[Dict[str, Any]] = None,
+        *,
+        # Convenience kwargs (match ElodieSource.download) so notebooks/callers can
+        # pass persistence paths without constructing extra_params by hand.
+        raw_save_path: str | os.PathLike[str] | None = None,
+        zarr_paths: str | os.PathLike[str] | List[str | os.PathLike[str]] | None = None,
+    ) -> List[SpectrumRecord]:
         """Download spectra for a single identifier using the unified flow.
 
         Optional saving:
@@ -188,7 +197,11 @@ class SpectraSource(ABC):
             - `save_dir` behaves like `raw_save_path` and sets `metadata["local_path"]`.
         """
 
-        extra_params = extra_params or {}
+        extra_params = dict(extra_params or {})
+        if raw_save_path is not None and "raw_save_path" not in extra_params and "save_dir" not in extra_params:
+            extra_params["raw_save_path"] = raw_save_path
+        if zarr_paths is not None and "zarr_paths" not in extra_params and "save_path" not in extra_params:
+            extra_params["zarr_paths"] = zarr_paths
         try:
             url = self.build_request_url(identifier, extra_params)
             logger.info(
@@ -290,11 +303,11 @@ class SpectraSource(ABC):
 
     def postprocess_downloaded_spectra(
         self,
-        spectra: List[Spectrum],
+        spectra: List[SpectrumRecord],
         *,
         extra_params: Dict[str, Any],
         process_ccf: bool | None = None,
-    ) -> List[Spectrum]:
+    ) -> List[SpectrumRecord]:
         """Optional saving/transforms applied after source-specific download logic."""
 
         raw_save_path = extra_params.get("raw_save_path") or extra_params.get("save_dir")
@@ -353,7 +366,7 @@ class SpectraSource(ABC):
         self,
         *,
         access_url: str,
-        spectrum: Spectrum,
+        spectrum: SpectrumRecord,
     ) -> tuple[bytes, Dict[str, Any]]:
         """Fetch FITS bytes for a spectrum.
 
@@ -397,7 +410,7 @@ class SpectraSource(ABC):
 
     def _persist_spectra_outputs(
         self,
-        spectra: List[Spectrum],
+        spectra: List[SpectrumRecord],
         *,
         raw_save_path: str | os.PathLike[str] | None,
         zarr_roots: List[tuple[str, Any]],
@@ -406,7 +419,7 @@ class SpectraSource(ABC):
         set_local_path: bool,
         process_ccf: bool,
         progress_every: int = 10,
-    ) -> List[Spectrum]:
+    ) -> List[SpectrumRecord]:
         raw_dir: Path | None = None
         if raw_save_path:
             raw_dir = Path(raw_save_path)
@@ -424,7 +437,7 @@ class SpectraSource(ABC):
                 group_counts[(ident_str, prod)] = group_counts.get((ident_str, prod), 0) + 1
         group_seen: Dict[tuple[str, str], int] = {}
 
-        saved: List[Spectrum] = []
+        saved: List[SpectrumRecord] = []
         total = len(spectra)
         for index, spectrum in enumerate(spectra, start=1):
             access_url = spectrum.metadata.get("access_url")
@@ -492,6 +505,7 @@ class SpectraSource(ABC):
                 ccf_total = 1
 
             filename = f"{raw_base_name}.fits"
+            dest: Path | None = (raw_dir / filename) if raw_dir is not None else None
 
             if total:
                 if index == 1 or index == total or (progress_every > 0 and index % progress_every == 0):
@@ -511,12 +525,46 @@ class SpectraSource(ABC):
                         },
                     )
 
+            # Caching: if the raw FITS file already exists, re-use its bytes instead of
+            # re-downloading. This avoids redundant network calls when re-running
+            # notebooks or bulk jobs.
+            fits_bytes: bytes | None = None
+            metadata_updates: Dict[str, Any] = {}
+            if dest is not None and dest.exists() and not overwrite:
+                try:
+                    head = dest.open("rb").read(512)
+                    if _looks_like_votable(head):
+                        # If we previously saved a DataLink VOTable under a .fits name,
+                        # do not treat it as a cache hit.
+                        logger.warning(
+                            "Existing raw file is a VOTable; ignoring cache and re-downloading",
+                            extra={"source": self.name, "spectrum_id": spectrum.spectrum_id, "path": str(dest)},
+                        )
+                    else:
+                        fits_bytes = dest.read_bytes()
+                        logger.info(
+                            "Using cached raw FITS (skip download)",
+                            extra={"source": self.name, "spectrum_id": spectrum.spectrum_id, "path": str(dest)},
+                        )
+                except Exception as exc:  # noqa: BLE001 - best-effort cache read
+                    logger.warning(
+                        "Failed to read cached raw FITS; re-downloading",
+                        extra={
+                            "source": self.name,
+                            "spectrum_id": spectrum.spectrum_id,
+                            "path": str(dest),
+                            "error": str(exc),
+                        },
+                    )
+                    fits_bytes = None
+
             logger.debug(
                 "Fetching FITS bytes for persistence",
                 extra={"source": self.name, "spectrum_id": spectrum.spectrum_id, "url": access_url},
             )
             new_metadata = dict(spectrum.metadata)
-            fits_bytes, metadata_updates = self.fetch_fits_payload(access_url=access_url, spectrum=spectrum)
+            if fits_bytes is None:
+                fits_bytes, metadata_updates = self.fetch_fits_payload(access_url=access_url, spectrum=spectrum)
             if metadata_updates:
                 new_metadata.update(metadata_updates)
             # Provide stable persistence naming for downstream consumers.
@@ -535,7 +583,6 @@ class SpectraSource(ABC):
                     "Attempting to save raw FITS",
                     extra={"source": self.name, "spectrum_id": spectrum.spectrum_id, "path": str(raw_dir / filename)},
                 )
-                dest = raw_dir / filename
                 should_write = overwrite or not dest.exists()
                 if not should_write and dest.exists():
                     # If we previously saved a DataLink VOTable under a .fits name, fix it automatically.
@@ -599,13 +646,10 @@ class SpectraSource(ABC):
                     )
                     zarr_key = self.write_fits_to_zarr(
                         fits_bytes=fits_bytes,
-                        spectrum=Spectrum(
+                        spectrum=SpectrumRecord(
                             spectrum_id=spectrum.spectrum_id,
                             source=spectrum.source,
-                            metadata=new_metadata,
-                            intensity=spectrum.intensity,
-                            wavelength=spectrum.wavelength,
-                            normalized=spectrum.normalized,
+                            metadata=new_metadata
                         ),
                         root=root,
                         zarr_name=zarr_base_name,
@@ -633,13 +677,10 @@ class SpectraSource(ABC):
                     new_metadata["zarr_keys"] = [w["key"] for w in zarr_writes]
 
             saved.append(
-                Spectrum(
+                SpectrumRecord(
                     spectrum_id=spectrum.spectrum_id,
                     source=spectrum.source,
-                    metadata=new_metadata,
-                    intensity=spectrum.intensity,
-                    wavelength=spectrum.wavelength,
-                    normalized=spectrum.normalized,
+                    metadata=new_metadata
                 )
             )
 
@@ -672,7 +713,7 @@ class SpectraSource(ABC):
         self,
         *,
         fits_bytes: bytes,
-        spectrum: Spectrum,
+        spectrum: SpectrumRecord,
         root: Any,
         zarr_name: str | None = None,
         process_ccf: bool = True,
@@ -699,6 +740,10 @@ class SpectraSource(ABC):
         key = _safe_filename(zarr_name or spectrum.spectrum_id, default="spectrum")
         g = spectra_root.require_group(key)
 
+        # Datasets we always store as 2D (n_records, n_points), even when n_records == 1.
+        # Note: ELODIE uses `wavelengths` (plural) for its wavelength grid.
+        always_2d = {"wavelength", "wavelengths", "intensity", "error", "ccf"}
+
         # Write arrays as datasets under the spectrum group.
         for name, array in arrays.items():
             if array is None:
@@ -711,7 +756,9 @@ class SpectraSource(ABC):
                 if prod == "ccf" and name == "ccf":
                     idx = spectrum.metadata.get("_ccf_index")
                     total = spectrum.metadata.get("_ccf_total")
-                elif name in {"intensity", "wavelength"}:
+                # Stack per-spectrum datasets across multiple spectra for a given identifier.
+                # Support both singular/plural naming conventions used by different sources.
+                elif name in {"intensity", "wavelength", "wavelengths", "error"}:
                     idx = spectrum.metadata.get("_spec_index")
                     total = spectrum.metadata.get("_spec_total")
                 else:
@@ -725,20 +772,36 @@ class SpectraSource(ABC):
                 return idx_i, total_i
 
             idx_i, total_i = _stack_params()
+            # Ensure at-least-2D layout for key datasets, even for single-record outputs.
+            wants_2d = name in always_2d
+            if wants_2d:
+                if total_i is None:
+                    total_i = 1
+                if idx_i is None:
+                    idx_i = 1
+
+            # For stacking, normalize 2D (1, N) to 1D row vector.
+            row_vec = None
+            if wants_2d:
+                if arr.ndim == 1:
+                    row_vec = arr
+                elif arr.ndim == 2 and arr.shape[0] == 1:
+                    row_vec = arr[0]
+
             should_stack = (
-                idx_i is not None
+                wants_2d
+                and idx_i is not None
                 and total_i is not None
-                and total_i > 1
-                and arr.ndim == 1
+                and row_vec is not None
             )
 
             if should_stack:
-                # Store as (n, n_wavelengths) (or (n, n_ccf)) with rows indexed by idx_i (1-based).
-                row = idx_i - 1
-                n_points = int(arr.shape[0])
+                # Store as (n, n_points) with rows indexed by idx_i (1-based).
+                row = int(idx_i) - 1
+                n_points = int(row_vec.shape[0])
 
                 # Use float + NaN padding so variable-length rows can coexist.
-                arr2 = np.asarray(arr, dtype=float)
+                arr2 = np.asarray(row_vec, dtype=float)
 
                 if name in g:
                     ds = g[name]
@@ -750,7 +813,11 @@ class SpectraSource(ABC):
                             raise TypeError(f"Existing Zarr dataset {name} is not 2D; set overwrite=True to replace")
                     if ds is not None:
                         if ds.shape[0] != total_i:
-                            raise TypeError(f"Incompatible shape ({ds.shape} vs {(total_i, ds.shape[1])})")
+                            if overwrite:
+                                del g[name]
+                                ds = None
+                            else:
+                                raise TypeError(f"Incompatible shape ({ds.shape} vs {(total_i, ds.shape[1])})")
                         if ds.shape[1] < n_points:
                             ds.resize((total_i, n_points))
                 else:
@@ -771,28 +838,12 @@ class SpectraSource(ABC):
                 if ds.shape[1] > n_points:
                     ds[row, n_points:] = np.nan
 
-                # Track per-row point counts to make trimming unambiguous.
-                len_name = "n_ccf_points" if _product_tag(spectrum) == "ccf" and name == "ccf" else "n_points"
-                if len_name in g:
-                    ds_len = g[len_name]
-                    if ds_len.shape != (total_i,):
-                        if overwrite:
-                            del g[len_name]
-                            ds_len = None
-                        else:
-                            raise TypeError(f"Existing Zarr dataset {len_name} has unexpected shape {ds_len.shape}")
-                else:
-                    ds_len = None
-                if ds_len is None:
-                    ds_len = g.require_dataset(
-                        len_name,
-                        shape=(total_i,),
-                        dtype="i4",
-                        chunks=(total_i,),
-                        overwrite=overwrite,
-                    )
-                ds_len[row] = n_points
+                # Intentionally do not store per-row point-count datasets in Zarr.
             else:
+                # If the caller provided a 1D vector for a dataset that should be 2D,
+                # store it as (1, N) for consistency.
+                if wants_2d and arr.ndim == 1:
+                    arr = np.asarray(arr, dtype=float)[None, :]
                 ds = g.require_dataset(
                     name,
                     shape=arr.shape,
@@ -811,11 +862,88 @@ class SpectraSource(ABC):
 
         return f"spectra/{key}"
 
+    def extract_arrays_from_fits_payload(
+        self,
+        *,
+        fits_bytes: bytes,
+        spectrum: SpectrumRecord,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Backward-compatible dispatcher for FITS->arrays extraction.
+
+        Prefer overriding:
+        - `extract_spectrum_arrays_from_fits_payload(...)` for spectra
+        - `extract_ccf_arrays_from_fits_payload(...)` for CCF
+        """
+
+        if _product_tag(spectrum) == "ccf":
+            return self.extract_ccf_arrays_from_fits_payload(fits_bytes=fits_bytes, spectrum=spectrum)
+        return self.extract_spectrum_arrays_from_fits_payload(fits_bytes=fits_bytes, spectrum=spectrum)
+
+    def extract_spectrum_arrays_from_fits_payload(
+        self,
+        *,
+        fits_bytes: bytes,
+        spectrum: SpectrumRecord,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Extract Zarr arrays for a spectrum product from FITS bytes.
+
+        This is the *main per-source hook* for spectra: override this in each source.
+        Default behavior parses from FITS via `extract_1d_wavelength_intensity_from_fits_bytes`.
+        """
+
+        import numpy as np  # type: ignore
+
+        arrays: Dict[str, Any] = {}
+        info: Dict[str, Any] = {}
+        wavelength = None
+        intensity = None
+        try:
+            wl2, inten2, s_info = extract_1d_wavelength_intensity_from_fits_bytes(fits_bytes)
+            info = s_info or {}
+            if wl2 is not None:
+                wavelength = np.asarray(wl2)
+            if inten2 is not None:
+                intensity = np.asarray(inten2)
+        except Exception:
+            info = {"extraction": "none"}
+
+        if wavelength is not None:
+            arrays["wavelength"] = wavelength
+        if intensity is not None:
+            arrays["intensity"] = intensity
+        return arrays, info
+
+    def extract_ccf_arrays_from_fits_payload(
+        self,
+        *,
+        fits_bytes: bytes,
+        spectrum: SpectrumRecord,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Extract Zarr arrays for a CCF product from FITS bytes.
+
+        This is the *main per-source hook* for CCF: override this in each source.
+        Default behavior parses `ccf` from FITS using `extract_ccf_from_fits_bytes`.
+        """
+
+        import numpy as np  # type: ignore
+
+        arrays: Dict[str, Any] = {}
+        info: Dict[str, Any] = {}
+
+        try:
+            _, ccf_vals, ccf_info = extract_ccf_from_fits_bytes(fits_bytes)
+            info = ccf_info or {}
+            if ccf_vals is not None:
+                arrays["ccf"] = np.asarray(ccf_vals)
+        except Exception:
+            info = {"extraction": "none"}
+        return arrays, info
+
     def ccf_to_zarr_components(
         self,
         *,
         fits_bytes: bytes,
-        spectrum: Spectrum,
+        spectrum: SpectrumRecord,
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """Convert a CCF product to Zarr components (arrays + attributes).
 
@@ -823,9 +951,7 @@ class SpectraSource(ABC):
         The default tries to parse (velocity, ccf) from FITS bytes (requires astropy).
         """
 
-        import numpy as np  # type: ignore
-
-        arrays: Dict[str, Any] = {}
+        arrays, extraction_info = self.extract_ccf_arrays_from_fits_payload(fits_bytes=fits_bytes, spectrum=spectrum)
         attrs: Dict[str, Any] = {
             "schema": "spectra_download.ccf.v1",
             "product": "ccf",
@@ -833,21 +959,13 @@ class SpectraSource(ABC):
             "source": spectrum.source,
             "metadata": {k: str(v) for k, v in spectrum.metadata.items()},
         }
-
-        try:
-            _, ccf_vals, info = extract_ccf_from_fits_bytes(fits_bytes)
-            attrs["extraction"] = info
-            if ccf_vals is not None:
-                arrays["ccf"] = np.asarray(ccf_vals)
-        except Exception:
-            attrs["extraction"] = {"extraction": "none"}
+        if extraction_info:
+            attrs["extraction"] = extraction_info
 
         # Construct the typed dataclass for callers that want it (primarily for debugging/extension).
-        _ = CCF(
-            ccf_id=str(spectrum.spectrum_id),
+        _ = CCFRecord(
+            spectrum_id=str(spectrum.spectrum_id),
             source=str(spectrum.source),
-            velocity=[],
-            ccf=arrays.get("ccf", []),
             metadata=dict(spectrum.metadata),
         )
 
@@ -857,7 +975,7 @@ class SpectraSource(ABC):
         self,
         *,
         fits_bytes: bytes,
-        spectrum: Spectrum,
+        spectrum: SpectrumRecord,
     ) -> tuple[Dict[str, Any], Dict[str, Any]]:
         """Convert a spectrum to Zarr components (arrays + attributes).
 
@@ -869,44 +987,7 @@ class SpectraSource(ABC):
             attrs: Mapping of attribute name -> JSON-serializable value (or best-effort).
         """
 
-        import numpy as np  # type: ignore
-
-        arrays: Dict[str, Any] = {}
-
-        # Prefer already-populated arrays on the Spectrum record.
-        wavelength = None
-        intensity = None
-        try:
-            if getattr(spectrum, "wavelength", None) is not None:
-                w = np.asarray(spectrum.wavelength)
-                if w.size:
-                    wavelength = w
-            if getattr(spectrum, "intensity", None) is not None:
-                i = np.asarray(spectrum.intensity)
-                if i.size:
-                    intensity = i
-        except Exception:
-            wavelength = None
-            intensity = None
-
-        extraction_info: Dict[str, Any] = {}
-        if wavelength is None or intensity is None:
-            # Best-effort fallback: parse from FITS bytes (requires astropy).
-            try:
-                wl2, inten2, info = extract_1d_wavelength_intensity_from_fits_bytes(fits_bytes)
-                extraction_info = info
-                if wavelength is None and wl2 is not None:
-                    wavelength = np.asarray(wl2)
-                if intensity is None and inten2 is not None:
-                    intensity = np.asarray(inten2)
-            except Exception:
-                # No astropy (or parse failure) -> keep only raw bytes.
-                extraction_info = {"extraction": "none"}
-
-        if wavelength is not None:
-            arrays["wavelength"] = wavelength
-        if intensity is not None:
-            arrays["intensity"] = intensity
+        arrays, extraction_info = self.extract_spectrum_arrays_from_fits_payload(fits_bytes=fits_bytes, spectrum=spectrum)
 
         attrs: Dict[str, Any] = {
             "schema": "spectra_download.v1",
@@ -922,18 +1003,18 @@ class SpectraSource(ABC):
 
     def _save_spectra_files(
         self,
-        spectra: List[Spectrum],
+        spectra: List[SpectrumRecord],
         *,
         save_dir: str | os.PathLike[str],
         overwrite: bool = False,
         filename_strategy: str = "spectrum_id",
-    ) -> List[Spectrum]:
+    ) -> List[SpectrumRecord]:
         """Download each Spectrum's access_url to `save_dir` and annotate local_path."""
 
         out_dir = Path(save_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        saved: List[Spectrum] = []
+        saved: List[SpectrumRecord] = []
         for index, spectrum in enumerate(spectra, start=1):
             access_url = spectrum.metadata.get("access_url")
             if not access_url or not isinstance(access_url, str):
@@ -963,13 +1044,10 @@ class SpectraSource(ABC):
             new_metadata = dict(spectrum.metadata)
             new_metadata["local_path"] = str(local_path)
             saved.append(
-                Spectrum(
+                SpectrumRecord(
                     spectrum_id=spectrum.spectrum_id,
                     source=spectrum.source,
-                    metadata=new_metadata,
-                    intensity=spectrum.intensity,
-                    wavelength=spectrum.wavelength,
-                    normalized=spectrum.normalized,
+                    metadata=new_metadata
                 )
             )
 
