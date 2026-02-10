@@ -65,6 +65,30 @@ def _normalize_base_url(base_url: str) -> str:
     return base_url
 
 
+def _safe_angle_deg(value: Any, *, unit: u.UnitBase) -> float | None:
+    """Best-effort Angle -> degree conversion (return None on parse failure)."""
+
+    if value is None:
+        return None
+
+
+def _split_zarr_paths(zarr_paths: Any) -> tuple[Any | None, Any | None]:
+    if not zarr_paths:
+        return None, None
+    if isinstance(zarr_paths, (list, tuple)) and len(zarr_paths) >= 2:
+        return zarr_paths[0], zarr_paths[1]
+    if isinstance(zarr_paths, (str, os.PathLike)):
+        path_str = str(zarr_paths)
+        if path_str.endswith(".zarr"):
+            return zarr_paths, f"{path_str[:-5]}_ccf.zarr"
+        return zarr_paths, f"{path_str}_ccf"
+    return None, None
+    try:
+        return Angle(value, unit=unit).degree
+    except Exception:  # noqa: BLE001 - best-effort parsing for inconsistent headers
+        return None
+
+
 class _AnchorHTMLParser(HTMLParser):
     """Minimal anchor extractor (stdlib-only) for ELODIE HTML pages."""
 
@@ -206,17 +230,21 @@ class ElodieSource(SpectraSource):
             SpectrumKeys.error.value: np.atleast_1d(np.array(fits[2].data, dtype=np.float64))
         }
         info: Dict[str, Any] = {
-            DataKeys.exptime.value: hdr['EXPTIME'],
-            DataKeys.ra.value: Angle(hdr['ALPHA'], unit=u.hourangle).degree,
-            DataKeys.dec.value: Angle(hdr['DELTA'], unit=u.deg).degree,
-            DataKeys.date.value: hdr['DATE-OBS'],
-            DataKeys.mjd.value: hdr['MJD-OBS'],
-            DataKeys.airmass.value: hdr['AIRMASS'],
-            DataKeys.object.value: hdr['OBJECT'],
-            DataKeys.berv.value: hdr['BERV'],
+            DataKeys.exptime.value: hdr["EXPTIME"],
+            DataKeys.date.value: hdr["DATE-OBS"],
+            DataKeys.mjd.value: hdr["MJD-OBS"],
+            DataKeys.airmass.value: hdr["AIRMASS"],
+            DataKeys.object.value: hdr["OBJECT"],
+            DataKeys.berv.value: hdr["BERV"],
             DataKeys.frame.value: ObservedFrame.observer.value,
             DataKeys.normalized.value: False,
         }
+        ra_deg = _safe_angle_deg(hdr.get("ALPHA"), unit=u.hourangle)
+        if ra_deg is not None:
+            info[DataKeys.ra.value] = ra_deg
+        dec_deg = _safe_angle_deg(hdr.get("DELTA"), unit=u.deg)
+        if dec_deg is not None:
+            info[DataKeys.dec.value] = dec_deg
         return arrays, info
 
     def build_request_url(self, identifier: str, extra_params: Dict[str, Any]) -> str:
@@ -391,6 +419,22 @@ class ElodieSource(SpectraSource):
             )
             if not spectra:
                 self._record_not_found(identifier, extra_params=extra_params, reason="no_records")
+
+            zarr_paths = extra_params.get("zarr_paths")
+            spec_zarr, ccf_zarr = _split_zarr_paths(zarr_paths)
+            if include_ccf and spec_zarr and ccf_zarr:
+                spectra_only = [s for s in spectra if not isinstance(s, CCFRecord)]
+                ccf_only = [s for s in spectra if isinstance(s, CCFRecord)]
+
+                saved: List[SpectrumRecord] = []
+                if spectra_only:
+                    spec_params = dict(extra_params, zarr_paths=spec_zarr, process_ccf=False)
+                    saved.extend(self.postprocess_downloaded_spectra(spectra_only, extra_params=spec_params))
+                if ccf_only:
+                    ccf_params = dict(extra_params, zarr_paths=ccf_zarr, process_ccf=True)
+                    saved.extend(self.postprocess_downloaded_spectra(ccf_only, extra_params=ccf_params))
+                return saved
+
             return self.postprocess_downloaded_spectra(spectra, extra_params=extra_params)
         except Exception as exc:  # noqa: BLE001 - record then re-raise
             self._record_error(identifier, extra_params=extra_params, stage="download", error=exc)

@@ -16,7 +16,12 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from spectra_download.http_client import download_bytes, download_file, download_json
-from spectra_download.fits_utils import extract_1d_wavelength_intensity_from_fits_bytes, extract_ccf_from_fits_bytes
+from spectra_download.fits_utils import (
+    extract_1d_wavelength_intensity_from_fits_bytes,
+    extract_ccf_from_fits_bytes,
+    extract_data_keys_from_fits_bytes,
+)
+from spectra_download.sources.keys import DataKeys
 from spectra_download.models import CCFRecord, SpectrumRecord
 
 logger = logging.getLogger(__name__)
@@ -68,6 +73,29 @@ def _filename_from_access_url(access_url: str) -> str | None:
 def _product_tag(spectrum: SpectrumRecord) -> str | None:
     product = spectrum.metadata.get("product")
     return str(product).strip().lower() if product is not None else None
+
+
+def _json_attr_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    try:
+        import numpy as np  # type: ignore
+
+        if isinstance(value, np.generic):
+            return value.item()
+    except Exception:
+        pass
+    return str(value)
+
+
+def _json_sanitize(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _json_sanitize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_sanitize(v) for v in value]
+    return _json_attr_value(value)
 
 
 def _looks_like_votable(payload: bytes) -> bool:
@@ -853,9 +881,32 @@ class SpectraSource(ABC):
                 ds[...] = arr
 
         # Attach attributes.
+        prod = _product_tag(spectrum)
+        record_idx = spectrum.metadata.get("_ccf_index" if prod == "ccf" else "_spec_index")
+        record_total = spectrum.metadata.get("_ccf_total" if prod == "ccf" else "_spec_total")
+        if record_idx is not None:
+            records = dict(getattr(g.attrs, "get", lambda k, d=None: d)("records", {}) or {})
+            try:
+                record_key = str(int(record_idx))
+            except Exception:
+                record_key = str(spectrum.spectrum_id)
+            records[record_key] = _json_sanitize(
+                {
+                    "index": record_idx,
+                    "total": record_total,
+                    "spectrum_id": spectrum.spectrum_id,
+                    "source": spectrum.source,
+                    "product": prod,
+                    "metadata": attrs.get("metadata"),
+                    "data": attrs.get("data"),
+                    "extraction": attrs.get("extraction"),
+                }
+            )
+            g.attrs["records"] = records
+
         for k, v in attrs.items():
             try:
-                g.attrs[k] = v
+                g.attrs[k] = _json_sanitize(v)
             except Exception:
                 # Zarr attrs require JSON-serializable values; fall back to strings.
                 g.attrs[k] = str(v)
@@ -952,6 +1003,11 @@ class SpectraSource(ABC):
         """
 
         arrays, extraction_info = self.extract_ccf_arrays_from_fits_payload(fits_bytes=fits_bytes, spectrum=spectrum)
+        data_keys = extract_data_keys_from_fits_bytes(fits_bytes)
+        # Prefer per-source extraction info for known DataKeys.
+        for key in [k.value for k in DataKeys]:
+            if key in extraction_info and extraction_info[key] is not None:
+                data_keys[key] = extraction_info[key]
         attrs: Dict[str, Any] = {
             "schema": "spectra_download.ccf.v1",
             "product": "ccf",
@@ -959,6 +1015,8 @@ class SpectraSource(ABC):
             "source": spectrum.source,
             "metadata": {k: str(v) for k, v in spectrum.metadata.items()},
         }
+        if data_keys:
+            attrs["data"] = {k: _json_attr_value(v) for k, v in data_keys.items()}
         if extraction_info:
             attrs["extraction"] = extraction_info
 
@@ -988,6 +1046,11 @@ class SpectraSource(ABC):
         """
 
         arrays, extraction_info = self.extract_spectrum_arrays_from_fits_payload(fits_bytes=fits_bytes, spectrum=spectrum)
+        data_keys = extract_data_keys_from_fits_bytes(fits_bytes)
+        # Prefer per-source extraction info for known DataKeys.
+        for key in [k.value for k in DataKeys]:
+            if key in extraction_info and extraction_info[key] is not None:
+                data_keys[key] = extraction_info[key]
 
         attrs: Dict[str, Any] = {
             "schema": "spectra_download.v1",
@@ -996,6 +1059,8 @@ class SpectraSource(ABC):
             "normalized": bool(getattr(spectrum, "normalized", False)),
             "metadata": {k: str(v) for k, v in spectrum.metadata.items()},
         }
+        if data_keys:
+            attrs["data"] = {k: _json_attr_value(v) for k, v in data_keys.items()}
         if extraction_info:
             attrs["extraction"] = extraction_info
 

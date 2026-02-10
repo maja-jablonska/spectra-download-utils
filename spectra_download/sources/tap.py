@@ -126,6 +126,7 @@ class TapSpectraSource(SpectraSource):
                 candidates.append(c)
 
         last: List[SpectrumRecord] = []
+        last_exc: Exception | None = None
         for cand in candidates:
             params = dict(extra_params)
             # Remove fallbacks so we don't recurse/duplicate tries through super().
@@ -176,8 +177,9 @@ class TapSpectraSource(SpectraSource):
 
             try:
                 spectra = super().download(cand, params)
-            except Exception:
+            except Exception as exc:
                 # Errors are already recorded via error_path in the base class if enabled.
+                last_exc = exc
                 continue
             if spectra:
                 # Re-label to the primary identifier for consistent saving.
@@ -195,6 +197,11 @@ class TapSpectraSource(SpectraSource):
                     )
                 return relabeled
             last = spectra
+
+        # If all candidates failed due to an exception (e.g. download/auth error),
+        # surface that instead of returning an empty "not found" result.
+        if (not last) and last_exc is not None:
+            raise last_exc
 
         # None matched: record not-found for the primary identifier once.
         if not_found_path is not None:

@@ -1,0 +1,51 @@
+#!/bin/bash
+#PBS -N harps_download
+#PBS -l select=1:ncpus=2:mem=8gb
+#PBS -l walltime=04:00:00
+#PBS -j oe
+
+set -euo pipefail
+
+# ---- User-configurable paths ----
+WORKDIR="/Users/mjablons/Documents/spectra"
+IDENTIFIERS_FILE="${WORKDIR}/harps_identifiers.txt"
+RAW_SAVE_DIR="${WORKDIR}/notebook_test/spectra/eso/harps"
+ZARR_PATH="${WORKDIR}/notebook_test/eso_harps.zarr"
+
+# Optional ESO credentials for proprietary data:
+# export ESO_USERNAME="..."
+# export ESO_PASSWORD="..."
+
+cd "${WORKDIR}"
+
+python - <<'PY'
+import os
+from pathlib import Path
+
+from spectra_download import EsoHarpsSource
+
+workdir = Path(os.environ.get("WORKDIR", "/Users/mjablons/Documents/spectra"))
+identifiers_file = Path(os.environ.get("IDENTIFIERS_FILE", workdir / "harps_identifiers.txt"))
+raw_save_dir = Path(os.environ.get("RAW_SAVE_DIR", workdir / "notebook_test/spectra/eso/harps"))
+zarr_path = Path(os.environ.get("ZARR_PATH", workdir / "notebook_test/eso_harps.zarr"))
+
+if not identifiers_file.exists():
+    raise FileNotFoundError(f"Missing identifiers file: {identifiers_file}")
+
+identifiers = [line.strip() for line in identifiers_file.read_text().splitlines() if line.strip() and not line.strip().startswith("#")]
+if not identifiers:
+    raise ValueError(f"No identifiers found in {identifiers_file}")
+
+src = EsoHarpsSource(timeout=60, max_retries=3)
+
+for ident in identifiers:
+    print(f"Downloading HARPS: {ident}")
+    src.download(
+        ident,
+        extra_params={"limit": 10, "use_coords": True},
+        raw_save_path=str(raw_save_dir),
+        zarr_paths=str(zarr_path),
+    )
+
+print("Done.")
+PY
