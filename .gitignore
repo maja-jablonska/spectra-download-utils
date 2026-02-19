@@ -20,3 +20,4 @@ htmlcov/
 *.mo
 *.pot
 *.DS_Store
+*.zarr
