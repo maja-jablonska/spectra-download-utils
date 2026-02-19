@@ -181,11 +181,11 @@ class CafeSource(SpectraSource):
     ) -> List[SpectrumRecord]:
         """Download CAFE spectra for an identifier via CALTO, with optional persistence."""
 
-        extra_params = dict(extra_params or {})
-        if raw_save_path is not None and "raw_save_path" not in extra_params and "save_dir" not in extra_params:
-            extra_params["raw_save_path"] = raw_save_path
-        if zarr_paths is not None and "zarr_paths" not in extra_params and "save_path" not in extra_params:
-            extra_params["zarr_paths"] = zarr_paths
+        extra_params = self._normalize_download_extra_params(
+            extra_params,
+            raw_save_path=raw_save_path,
+            zarr_paths=zarr_paths,
+        )
 
         use_coords = bool(extra_params.get("use_coords", True))
         # Form defaults.
@@ -360,4 +360,3 @@ class CafeSource(SpectraSource):
         # If it's gzipped FITS, leave as-is (astropy can read .fits.gz bytes only if decompressed,
         # but persistence is raw bytes; callers can override extraction if needed).
         return data, {"caha_zip_member": chosen, "caha_fetch_url": access_url}
-

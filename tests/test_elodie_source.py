@@ -2,11 +2,14 @@ import unittest
 import tempfile
 from pathlib import Path
 
+import astropy.units as u
+
 from spectra_download.sources.elodie import (
     ElodieSource,
     _extract_ccf_fits_urls,
     _extract_search_ccf_page_urls,
     _extract_spectrum_fits_urls,
+    _safe_angle_deg,
     _sanitize_url,
     _spectrum_id_from_url,
 )
@@ -55,6 +58,17 @@ class TestElodieParsing(unittest.TestCase):
     def test_spectrum_id_from_url_prefers_o_param(self) -> None:
         url = "http://atlas.obs-hp.fr/elodie/fE.cgi?a=mime:application/fits&o=elodie:19951220/0009"
         self.assertEqual(_spectrum_id_from_url(url, fallback="fallback"), "elodie:19951220/0009")
+
+    def test_safe_angle_deg_parses_and_handles_invalid_values(self) -> None:
+        ra = _safe_angle_deg("20:00:17", unit=u.hourangle)
+        dec = _safe_angle_deg("+03:11:00", unit=u.deg)
+        bad = _safe_angle_deg("not-an-angle", unit=u.deg)
+
+        self.assertIsNotNone(ra)
+        self.assertIsNotNone(dec)
+        self.assertAlmostEqual(float(ra), 300.0708333333, places=6)
+        self.assertAlmostEqual(float(dec), 3.1833333333, places=6)
+        self.assertIsNone(bad)
 
 
 class TestElodieSourceOfflineDownload(unittest.TestCase):
@@ -140,4 +154,3 @@ class TestElodieSourceOfflineDownload(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

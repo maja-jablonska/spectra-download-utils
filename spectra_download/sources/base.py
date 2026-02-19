@@ -172,7 +172,7 @@ def _extract_datalink_this_url(votable_xml: bytes) -> str | None:
         if access_url:
             return access_url
 
-        return None
+    return None
 
 
 class SpectraSource(ABC):
@@ -195,6 +195,28 @@ class SpectraSource(ABC):
     @abstractmethod
     def parse_response(self, payload: Dict[str, Any], identifier: str) -> List[SpectrumRecord]:
         """Parse response payload into spectra records."""
+
+    def _normalize_download_extra_params(
+        self,
+        extra_params: Optional[Dict[str, Any]],
+        *,
+        raw_save_path: str | os.PathLike[str] | None = None,
+        zarr_paths: str | os.PathLike[str] | List[str | os.PathLike[str]] | None = None,
+        not_found_path: str | os.PathLike[str] | None = None,
+        error_path: str | os.PathLike[str] | None = None,
+    ) -> Dict[str, Any]:
+        """Merge convenience download kwargs into `extra_params`."""
+
+        params = dict(extra_params or {})
+        if raw_save_path is not None and "raw_save_path" not in params and "save_dir" not in params:
+            params["raw_save_path"] = raw_save_path
+        if zarr_paths is not None and "zarr_paths" not in params and "save_path" not in params:
+            params["zarr_paths"] = zarr_paths
+        if not_found_path is not None and "not_found_path" not in params:
+            params["not_found_path"] = not_found_path
+        if error_path is not None and "error_path" not in params:
+            params["error_path"] = error_path
+        return params
 
     def download(
         self,
@@ -225,11 +247,11 @@ class SpectraSource(ABC):
             - `save_dir` behaves like `raw_save_path` and sets `metadata["local_path"]`.
         """
 
-        extra_params = dict(extra_params or {})
-        if raw_save_path is not None and "raw_save_path" not in extra_params and "save_dir" not in extra_params:
-            extra_params["raw_save_path"] = raw_save_path
-        if zarr_paths is not None and "zarr_paths" not in extra_params and "save_path" not in extra_params:
-            extra_params["zarr_paths"] = zarr_paths
+        extra_params = self._normalize_download_extra_params(
+            extra_params,
+            raw_save_path=raw_save_path,
+            zarr_paths=zarr_paths,
+        )
         try:
             url = self.build_request_url(identifier, extra_params)
             logger.info(
@@ -852,7 +874,7 @@ class SpectraSource(ABC):
                     ds = None
 
                 if ds is None:
-                    ds = g.require_dataset(
+                    ds = g.require_array(
                         name,
                         shape=(total_i, n_points),
                         dtype="f8",
@@ -872,7 +894,7 @@ class SpectraSource(ABC):
                 # store it as (1, N) for consistency.
                 if wants_2d and arr.ndim == 1:
                     arr = np.asarray(arr, dtype=float)[None, :]
-                ds = g.require_dataset(
+                ds = g.require_array(
                     name,
                     shape=arr.shape,
                     dtype=arr.dtype,

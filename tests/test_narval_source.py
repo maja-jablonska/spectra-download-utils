@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -82,7 +84,28 @@ class TestNarvalSourceFallback(unittest.TestCase):
         self.assertEqual(spectra[0].metadata["identifier"], "Betelgeuse")
         self.assertTrue(str(spectra[0].metadata.get("query_identifier", "")).startswith("COORDS:"))
 
+    def test_download_records_not_found_once_after_all_fallbacks(self) -> None:
+        src = NarvalSource(timeout=1, max_retries=1)
+        empty = {"metadata": [{"name": "ID"}], "data": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            not_found = Path(tmp) / "not_found.jsonl"
+            with patch("spectra_download.sources.base.download_json", return_value=empty):
+                spectra = src.download(
+                    "HD18474",
+                    {
+                        "limit": 1,
+                        "use_like": False,
+                        "use_coords": False,
+                        "not_found_path": str(not_found),
+                    },
+                )
+
+            self.assertEqual(spectra, [])
+            lines = [line for line in not_found.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertEqual(len(lines), 1)
+            self.assertIn('"identifier": "HD18474"', lines[0])
+
 
 if __name__ == "__main__":
     unittest.main()
-

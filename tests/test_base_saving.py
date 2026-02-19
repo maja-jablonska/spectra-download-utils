@@ -25,6 +25,51 @@ class DummySource(SpectraSource):
 
 
 class TestBaseSaving(unittest.TestCase):
+    def test_normalize_download_extra_params_injects_kwargs(self) -> None:
+        source = DummySource(timeout=1, max_retries=1)
+        params = source._normalize_download_extra_params(
+            {},
+            raw_save_path="/tmp/raw",
+            zarr_paths="/tmp/out.zarr",
+            not_found_path="/tmp/not_found.jsonl",
+            error_path="/tmp/errors.jsonl",
+        )
+        self.assertEqual(params["raw_save_path"], "/tmp/raw")
+        self.assertEqual(params["zarr_paths"], "/tmp/out.zarr")
+        self.assertEqual(params["not_found_path"], "/tmp/not_found.jsonl")
+        self.assertEqual(params["error_path"], "/tmp/errors.jsonl")
+
+    def test_normalize_download_extra_params_preserves_existing_values(self) -> None:
+        source = DummySource(timeout=1, max_retries=1)
+        params = source._normalize_download_extra_params(
+            {
+                "raw_save_path": "/already/raw",
+                "zarr_paths": "/already/out.zarr",
+                "not_found_path": "/already/not_found.jsonl",
+                "error_path": "/already/errors.jsonl",
+            },
+            raw_save_path="/new/raw",
+            zarr_paths="/new/out.zarr",
+            not_found_path="/new/not_found.jsonl",
+            error_path="/new/errors.jsonl",
+        )
+        self.assertEqual(params["raw_save_path"], "/already/raw")
+        self.assertEqual(params["zarr_paths"], "/already/out.zarr")
+        self.assertEqual(params["not_found_path"], "/already/not_found.jsonl")
+        self.assertEqual(params["error_path"], "/already/errors.jsonl")
+
+    def test_normalize_download_extra_params_respects_save_dir_and_save_path(self) -> None:
+        source = DummySource(timeout=1, max_retries=1)
+        params = source._normalize_download_extra_params(
+            {"save_dir": "/legacy/raw", "save_path": "/legacy/out.zarr"},
+            raw_save_path="/new/raw",
+            zarr_paths="/new/out.zarr",
+        )
+        self.assertNotIn("raw_save_path", params)
+        self.assertNotIn("zarr_paths", params)
+        self.assertEqual(params["save_dir"], "/legacy/raw")
+        self.assertEqual(params["save_path"], "/legacy/out.zarr")
+
     def test_raw_save_path_writes_fits_bytes_and_sets_raw_path(self) -> None:
         source = DummySource(timeout=1, max_retries=1)
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,6 +98,9 @@ class TestBaseSaving(unittest.TestCase):
             with patch("spectra_download.sources.base.download_json", return_value={}), patch(
                 "spectra_download.sources.base.download_bytes",
                 return_value=b"FITSBYTES",
+            ), patch(
+                "spectra_download.sources.base.extract_data_keys_from_fits_bytes",
+                return_value={},
             ), patch(
                 "spectra_download.sources.base.extract_1d_wavelength_intensity_from_fits_bytes",
                 return_value=([1.0, 2.0], [10.0, 20.0], {"extraction": "stub"}),
@@ -87,6 +135,9 @@ class TestBaseSaving(unittest.TestCase):
             with patch("spectra_download.sources.base.download_json", return_value={}), patch(
                 "spectra_download.sources.base.download_bytes",
                 return_value=b"FITSBYTES",
+            ), patch(
+                "spectra_download.sources.base.extract_data_keys_from_fits_bytes",
+                return_value={},
             ), patch(
                 "spectra_download.sources.base.extract_1d_wavelength_intensity_from_fits_bytes",
                 return_value=([1.0, 2.0], [10.0, 20.0], {"extraction": "stub"}),
@@ -144,6 +195,9 @@ class TestBaseSaving(unittest.TestCase):
                 "spectra_download.sources.base.download_bytes",
                 return_value=b"FITSBYTES",
             ), patch(
+                "spectra_download.sources.base.extract_data_keys_from_fits_bytes",
+                return_value={},
+            ), patch(
                 "spectra_download.sources.base.extract_1d_wavelength_intensity_from_fits_bytes",
                 side_effect=extracted,
             ):
@@ -196,6 +250,9 @@ class TestBaseSaving(unittest.TestCase):
             with patch("spectra_download.sources.base.download_json", return_value={}), patch(
                 "spectra_download.sources.base.download_bytes",
                 return_value=b"FITSBYTES",
+            ), patch(
+                "spectra_download.sources.base.extract_data_keys_from_fits_bytes",
+                return_value={},
             ), patch(
                 "spectra_download.sources.base.extract_ccf_from_fits_bytes",
                 return_value=([0.0, 1.0], [10.0, 9.0], {"extraction": "stub"}),

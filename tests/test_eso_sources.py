@@ -183,7 +183,46 @@ class TestEsoDataLinkAndAuthFetch(unittest.TestCase):
         self.assertIsNone(calls[0]["headers"])
         self.assertEqual(calls[1]["headers"], {"Authorization": "Bearer TOKEN"})
 
+    def test_fetch_fits_payload_datalink_fallback_scans_all_this_rows(self) -> None:
+        # First #this row has empty access_url, second row has a valid URL.
+        # content_type is non-FITS so the first pass skips both rows and fallback must scan all.
+        votable = b"""<?xml version='1.0'?>
+<VOTABLE xmlns='http://www.ivoa.net/xml/VOTable/v1.3' version='1.3'>
+  <RESOURCE type='results'>
+    <TABLE>
+      <FIELD name='access_url' datatype='char' arraysize='*'/>
+      <FIELD name='semantics' datatype='char' arraysize='*'/>
+      <FIELD name='content_type' datatype='char' arraysize='*'/>
+      <DATA>
+        <TABLEDATA>
+          <TR>
+            <TD></TD>
+            <TD>#this</TD>
+            <TD>text/plain</TD>
+          </TR>
+          <TR>
+            <TD>https://example.test/file2.fits</TD>
+            <TD>#this</TD>
+            <TD>text/plain</TD>
+          </TR>
+        </TABLEDATA>
+      </DATA>
+    </TABLE>
+  </RESOURCE>
+</VOTABLE>
+"""
+        fits_magic = b"SIMPLE  =                    TEND"
+
+        src = EsoUvesSource(timeout=1, max_retries=1)
+        spectrum = SpectrumRecord(spectrum_id="1", source=src.name, metadata={"identifier": "X"})
+
+        with patch("spectra_download.sources.eso.download_bytes", side_effect=[votable, fits_magic]):
+            out_bytes, updates = src.fetch_fits_payload(access_url="http://example.test/dl", spectrum=spectrum)
+
+        self.assertEqual(out_bytes, fits_magic)
+        self.assertEqual(updates["access_url"], "https://example.test/file2.fits")
+        self.assertEqual(updates["datalink_url"], "http://example.test/dl")
+
 
 if __name__ == "__main__":
     unittest.main()
-

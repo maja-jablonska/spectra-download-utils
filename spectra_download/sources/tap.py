@@ -103,11 +103,11 @@ class TapSpectraSource(SpectraSource):
         `metadata["query_identifier"]` with the candidate that matched.
         """
 
-        extra_params = dict(extra_params or {})
-        if raw_save_path is not None and "raw_save_path" not in extra_params and "save_dir" not in extra_params:
-            extra_params["raw_save_path"] = raw_save_path
-        if zarr_paths is not None and "zarr_paths" not in extra_params and "save_path" not in extra_params:
-            extra_params["zarr_paths"] = zarr_paths
+        extra_params = self._normalize_download_extra_params(
+            extra_params,
+            raw_save_path=raw_save_path,
+            zarr_paths=zarr_paths,
+        )
         fallbacks = extra_params.get("fallback_identifiers") or []
         use_coords = bool(extra_params.get("use_coords", False))
         radius_arcsec = float(extra_params.get("search_radius_arcsec", 5.0) or 5.0)

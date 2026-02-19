@@ -70,6 +70,10 @@ def _safe_angle_deg(value: Any, *, unit: u.UnitBase) -> float | None:
 
     if value is None:
         return None
+    try:
+        return Angle(value, unit=unit).degree
+    except Exception:  # noqa: BLE001 - best-effort parsing for inconsistent headers
+        return None
 
 
 def _split_zarr_paths(zarr_paths: Any) -> tuple[Any | None, Any | None]:
@@ -83,10 +87,6 @@ def _split_zarr_paths(zarr_paths: Any) -> tuple[Any | None, Any | None]:
             return zarr_paths, f"{path_str[:-5]}_ccf.zarr"
         return zarr_paths, f"{path_str}_ccf"
     return None, None
-    try:
-        return Angle(value, unit=unit).degree
-    except Exception:  # noqa: BLE001 - best-effort parsing for inconsistent headers
-        return None
 
 
 class _AnchorHTMLParser(HTMLParser):
@@ -334,15 +334,13 @@ class ElodieSource(SpectraSource):
             a JSON API, but it still delegates persistence to `postprocess_downloaded_spectra()`.
         """
 
-        extra_params = dict(extra_params or {})
-        if raw_save_path is not None and "raw_save_path" not in extra_params and "save_dir" not in extra_params:
-            extra_params["raw_save_path"] = raw_save_path
-        if zarr_paths is not None and "zarr_paths" not in extra_params and "save_path" not in extra_params:
-            extra_params["zarr_paths"] = zarr_paths
-        if not_found_path is not None and "not_found_path" not in extra_params:
-            extra_params["not_found_path"] = not_found_path
-        if error_path is not None and "error_path" not in extra_params:
-            extra_params["error_path"] = error_path
+        extra_params = self._normalize_download_extra_params(
+            extra_params,
+            raw_save_path=raw_save_path,
+            zarr_paths=zarr_paths,
+            not_found_path=not_found_path,
+            error_path=error_path,
+        )
         # Default to identifier-based naming for persisted outputs unless the caller
         # explicitly selects a strategy.
         if (

@@ -94,6 +94,40 @@ For structured outputs, continue to override:
 - `spectra_download/sources/`: Source-specific downloaders.
 - `spectra_download/bulk.py`: Unified bulk download flow.
 
+## Raw FITS to Zarr Converters
+
+Contract-compliant local converters are available for notebook-style raw FITS
+directories:
+
+```bash
+python scripts/espadons_to_zarr.py data/CFHT /tmp/espadons_data.zarr --overwrite
+python scripts/harps_to_zarr.py notebook_test/spectra/eso/harps /tmp/harps_data.zarr --overwrite
+python scripts/feros_to_zarr.py data/eso/feros /tmp/feros_data.zarr --overwrite
+python scripts/nirps_to_zarr.py data/eso/nirps /tmp/nirps_data.zarr --overwrite
+python scripts/uves_to_zarr.py data/eso/uves /tmp/uves_data.zarr --overwrite
+```
+
+These scripts write to `<output>.zarr.tmp`, run completeness checks, then
+atomically rename to `<output>.zarr`.
+
+Both scripts write top-level `continuum` and `unnormalized_flux`
+(`N_spec, N_pix`) with `NaN` fallback when unavailable.
+They also write companion arrays for when these products carry their own grids
+or errors:
+- `continuum_wavelength`, `continuum_uncertainty`
+- `unnormalized_wavelength`, `unnormalized_uncertainty`
+
+Pairing behavior:
+- Preferred pair: `flux + continuum`
+- Alternative pair: `flux + unnormalized_flux`
+
+ESPaDOnS-specific handling:
+- If `COL4-6` (UnNormalized) exist, `flux` is written from those columns.
+- If both normalized and unnormalized intensity exist, `continuum` is estimated
+  as `unnormalized / normalized`.
+- `metadata/gaia_id` and `metadata/gaia_dr` are written from `GAIAID` and
+  `GAIADR` headers when present.
+
 ## Notes
 
 These examples assume the source APIs are reachable and return JSON. If a source
